@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"claude-meter-proxy/internal/capture"
+	"claude-meter-proxy/internal/normalize"
 	"claude-meter-proxy/internal/proxy"
 	"claude-meter-proxy/internal/storage"
 )
@@ -16,13 +17,13 @@ type Config struct {
 	UpstreamBaseURL *url.URL
 	LogDir          string
 	QueueSize       int
+	PlanTier        string
 	Client          *http.Client
 }
 
 type App struct {
 	proxy     *proxy.Server
 	exchanges chan capture.CompletedExchange
-	writer    *storage.RawExchangeWriter
 
 	closeOnce sync.Once
 	wg        sync.WaitGroup
@@ -39,15 +40,19 @@ func New(cfg Config) (*App, error) {
 		cfg.QueueSize = 256
 	}
 
-	writer, err := storage.NewRawExchangeWriter(filepath.Join(cfg.LogDir, "raw"))
+	rawWriter, err := storage.NewRawExchangeWriter(filepath.Join(cfg.LogDir, "raw"))
 	if err != nil {
 		return nil, err
 	}
+	normalizedWriter, err := storage.NewNormalizedRecordWriter(filepath.Join(cfg.LogDir, "normalized"))
+	if err != nil {
+		return nil, err
+	}
+	normalizer := normalize.New(cfg.PlanTier)
 
 	exchanges := make(chan capture.CompletedExchange, cfg.QueueSize)
 	app := &App{
 		exchanges: exchanges,
-		writer:    writer,
 	}
 
 	app.proxy = proxy.New(proxy.Config{
@@ -60,7 +65,8 @@ func New(cfg Config) (*App, error) {
 	go func() {
 		defer app.wg.Done()
 		for exchange := range exchanges {
-			_ = writer.Write(exchange)
+			_ = rawWriter.Write(exchange)
+			_ = normalizedWriter.Write(normalizer.Normalize(exchange))
 		}
 	}()
 

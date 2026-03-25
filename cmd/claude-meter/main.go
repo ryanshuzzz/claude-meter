@@ -18,17 +18,32 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 || os.Args[1] != "start" {
-		fmt.Fprintf(os.Stderr, "usage: %s start [--port PORT] [--upstream URL] [--log-dir DIR]\n", os.Args[0])
+	if len(os.Args) < 2 {
+		fmt.Fprintf(os.Stderr, "usage: %s <start|backfill-normalized> [options]\n", os.Args[0])
 		os.Exit(2)
 	}
 
+	switch os.Args[1] {
+	case "start":
+		runStart(os.Args[2:])
+	case "backfill-normalized":
+		if err := runBackfillNormalized(os.Args[2:]); err != nil {
+			log.Fatalf("backfill-normalized: %v", err)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "usage: %s <start|backfill-normalized> [options]\n", os.Args[0])
+		os.Exit(2)
+	}
+}
+
+func runStart(args []string) {
 	startFlags := flag.NewFlagSet("start", flag.ExitOnError)
 	port := startFlags.Int("port", 7735, "port to listen on")
 	upstream := startFlags.String("upstream", "https://api.anthropic.com", "Anthropic upstream base URL")
 	logDir := startFlags.String("log-dir", defaultLogDir(), "base log directory")
 	queueSize := startFlags.Int("queue-size", 256, "in-memory completed exchange buffer")
-	startFlags.Parse(os.Args[2:])
+	planTier := startFlags.String("plan-tier", "unknown", "declared plan tier for normalized records")
+	startFlags.Parse(args)
 
 	upstreamURL, err := url.Parse(*upstream)
 	if err != nil {
@@ -39,6 +54,7 @@ func main() {
 		UpstreamBaseURL: upstreamURL,
 		LogDir:          expandHome(*logDir),
 		QueueSize:       *queueSize,
+		PlanTier:        *planTier,
 	})
 	if err != nil {
 		log.Fatalf("create app: %v", err)
@@ -55,6 +71,7 @@ func main() {
 		log.Printf("claude-meter proxy listening on http://%s", addr)
 		log.Printf("forwarding to %s", upstreamURL.String())
 		log.Printf("writing raw exchanges under %s", expandHome(*logDir))
+		log.Printf("declared plan tier: %s", *planTier)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
 		}
