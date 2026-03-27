@@ -1,207 +1,143 @@
-# claude-meter Rate Limiter — Deployment Guide
+# claude-meter Rate Limiter — One-Shot Deployment
 
-## Overview
+Run this on each OpenClaw machine. Copy-paste the whole thing.
 
-Each OpenClaw instance runs its own `claude-meter` proxy that enforces a 25% share of your Anthropic account budget. No cross-machine coordination needed — Anthropic's utilization headers are the source of truth.
-
-```
-OpenClaw → claude-meter (port 7735) → api.anthropic.com
-```
-
-## Quick Setup
-
-### 1. Build
+## Full Setup (one-shot)
 
 ```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "=== 1. Clone & build ==="
 cd ~/.openclaw/workspace
-git clone git@github.com:ryanshuzzz/claude-meter.git
+git clone git@github.com:ryanshuzzz/claude-meter.git 2>/dev/null || (cd claude-meter && git pull)
 cd claude-meter && git checkout senor-dev
 go build -o claude-meter ./cmd/claude-meter
-sudo mv claude-meter /usr/local/bin/
-```
+sudo cp claude-meter /usr/local/bin/claude-meter
 
-### 2. (Optional) Config file
-
-Create `~/.claude-meter/config.yaml`:
-
-```yaml
-rate_limits:
-  enabled: true
-  instance_share: 0.25
-  windows:
-    5h:
-      enabled: true
-      hard_limit: 0.25
-      warn_threshold: 0.20
-    7d:
-      enabled: true
-      hard_limit: 0.25
-      warn_threshold: 0.20
-  stale_after_seconds: 300
-```
-
-Or skip it — defaults are sensible (25% share, both windows enabled).
-
-### 3. Set up systemd service (auto-start on boot)
-
-```bash
-sudo tee /etc/systemd/system/claude-meter.service > /dev/null << 'EOF'
+echo "=== 2. Create systemd service ==="
+sudo tee /etc/systemd/system/claude-meter.service > /dev/null << 'UNIT'
 [Unit]
 Description=claude-meter rate-limited proxy
 After=network.target
 
 [Service]
 Type=simple
-User=$USER
+User=senorai
 ExecStart=/usr/local/bin/claude-meter start --plan-tier max_20x --instance-share 0.25
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-EOF
+UNIT
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now claude-meter
-```
+sleep 2
 
-Verify it's running:
-```bash
-sudo systemctl status claude-meter
-```
-
-### 4. Point OpenClaw at the proxy
-
-Set in your OpenClaw environment (`.env` or config):
-
-```bash
-ANTHROPIC_BASE_URL=http://127.0.0.1:7735
-```
-
-That's it. No OpenClaw code changes needed.
-
-### 5. Verify
-
-```bash
-# Health check
-curl http://127.0.0.1:7735/health
-
-# Live status
+echo "=== 3. Verify proxy ==="
+curl -sf http://127.0.0.1:7735/health && echo " ✅ Proxy running" || echo " ❌ Proxy failed to start"
 curl -s http://127.0.0.1:7735/status | jq .
 
-# CLI status (pretty-printed)
-claude-meter status
+echo "=== 4. Wire OpenClaw to proxy ==="
+# Add baseUrl override to openclaw.json (merge mode preserves existing config)
+OCJSON="$HOME/.openclaw/openclaw.json"
+cp "$OCJSON" "$OCJSON.pre-claude-meter"
+jq '.models = (.models // {}) | .models.mode = "merge" | .models.providers = (.models.providers // {}) | .models.providers.anthropic = (.models.providers.anthropic // {}) | .models.providers.anthropic.baseUrl = "http://127.0.0.1:7735" | .models.providers.anthropic.models = (.models.providers.anthropic.models // [])' "$OCJSON.pre-claude-meter" > "$OCJSON"
+echo " ✅ OpenClaw pointed at claude-meter proxy"
 
-# Agent hook (what the AI runs)
-bash claude-meter/scripts/check-usage.sh
-```
+echo "=== 5. Patch AGENTS.md ==="
+AGENTS="$HOME/.openclaw/workspace/AGENTS.md"
+if ! grep -q "claude-meter" "$AGENTS" 2>/dev/null; then
+  cat >> "$AGENTS" << 'PATCH'
 
----
-
-## OpenClaw Agent Instructions
-
-### 1. Add the pre-flight hook to AGENTS.md
-
-Add this to each instance's `AGENTS.md`. This is the critical part — it makes the AI agent usage-aware.
-
-**In Session Startup (add as the last step):**
-```markdown
-5. **Run usage check:** `bash claude-meter/scripts/check-usage.sh` — check account utilization before doing anything
-```
-
-**As a standalone section (add after Session Startup):**
-```markdown
 ## 📊 Rate Limiter (claude-meter)
 
 This instance runs behind a claude-meter proxy that enforces a 25% share of the shared Anthropic account budget.
 
-**Pre-flight check (MANDATORY):** Run `bash claude-meter/scripts/check-usage.sh` BEFORE processing EVERY user message. This is not optional — treat it like reading the message itself. Do it first, silently, every single time.
+**Pre-flight check (MANDATORY):** Run `bash claude-meter/scripts/check-usage.sh` BEFORE processing EVERY user message. This is not optional — treat it like reading the message itself. Do it first, every single time.
 
-- **✅ Usage OK** → proceed normally, do not mention the check
+**Footer (MANDATORY):** Append the output of the usage check as the LAST LINE of EVERY response. Format: just paste the raw output line from the script. This gives the user visibility into account utilization at all times.
+
+- **✅ Usage OK** → proceed normally
 - **⚠️ Usage high (>80%)** → conserve tokens: skip non-essential work, use shorter prompts, avoid spawning multiple sub-agents, prefer cached context
 - **🚫 RATE LIMITED** → STOP. Tell the user you're rate limited, show the reset time, and suggest waiting. Do NOT retry in a loop.
 
 **Quick status:** `curl -s http://127.0.0.1:7735/status | jq .`
 
 **Be token-conscious always:** You share this account with 3 other instances. Prefer cache-friendly prompts, batch work, and avoid unnecessary retries.
-```
+PATCH
+  echo " ✅ AGENTS.md patched"
+else
+  echo " ⏭️  AGENTS.md already has claude-meter section"
+fi
 
-### 2. Add HEARTBEAT.md health check
+echo "=== 6. Patch HEARTBEAT.md ==="
+HEARTBEAT="$HOME/.openclaw/workspace/HEARTBEAT.md"
+if ! grep -q "claude-meter" "$HEARTBEAT" 2>/dev/null; then
+  cat >> "$HEARTBEAT" << 'PATCH'
 
-Add this to each instance's `HEARTBEAT.md` so the agent monitors claude-meter during heartbeats:
-
-```markdown
 ## claude-meter Health
 - Run `systemctl is-active claude-meter` — if not active, run `sudo systemctl restart claude-meter` and notify the user
+PATCH
+  echo " ✅ HEARTBEAT.md patched"
+else
+  echo " ⏭️  HEARTBEAT.md already has claude-meter section"
+fi
+
+echo "=== 7. Restart OpenClaw ==="
+openclaw gateway restart &
+sleep 5
+
+echo ""
+echo "=== Done! ==="
+echo "Proxy:    http://127.0.0.1:7735"
+echo "Status:   claude-meter status"
+echo "Hook:     bash claude-meter/scripts/check-usage.sh"
+bash ~/.openclaw/workspace/claude-meter/scripts/check-usage.sh
 ```
 
-### 3. What the hook does
+## What this does
 
-`claude-meter/scripts/check-usage.sh` hits the local proxy's `/status` endpoint and returns:
-- Exit 0 + `✅ Usage OK` — headroom exists, proceed normally
-- Exit 0 + `⚠️ Usage high` — >80% of budget used, agent should conserve
-- Exit 1 + `🚫 RATE LIMITED` — at or above limit, agent should stop and wait
-- Exit 0 + `⚠️ not reachable` — proxy down, fail open (proceed without check)
-
-The agent reads the output and adjusts behavior accordingly. No code changes to OpenClaw needed.
-
----
+1. Clones claude-meter repo (or pulls if already there)
+2. Builds the Go binary and installs to `/usr/local/bin/`
+3. Creates systemd service (auto-start on boot, auto-restart on crash)
+4. Points OpenClaw's Anthropic provider at the local proxy (`http://127.0.0.1:7735`)
+5. Patches AGENTS.md with mandatory per-message usage check + footer
+6. Patches HEARTBEAT.md with health monitoring
+7. Restarts OpenClaw to pick up the new config
 
 ## Manual Usage Check
 
-To check usage at any time (as a human or from the agent):
-
 ```bash
-# Quick one-liner (agent hook)
+# Agent hook (one-liner, for every message)
 bash claude-meter/scripts/check-usage.sh
 
-# Full JSON status
+# Full JSON
 curl -s http://127.0.0.1:7735/status | jq .
 
-# Pretty CLI output
+# Pretty CLI
 claude-meter status
 ```
 
----
-
 ## Adjusting Shares
 
-For fewer instances, increase the share:
+Edit the systemd service ExecStart line:
 - 2 instances: `--instance-share 0.50`
 - 3 instances: `--instance-share 0.33`
 - 4 instances: `--instance-share 0.25` (default)
 
-Update the systemd service:
 ```bash
 sudo systemctl edit claude-meter
-# Add under [Service]: ExecStart= (blank to clear) then ExecStart=/usr/local/bin/claude-meter start --plan-tier max_20x --instance-share 0.50
+# Override ExecStart with new --instance-share value
 sudo systemctl restart claude-meter
 ```
 
-Environment variables also work:
-```bash
-CLAUDE_METER_INSTANCE_SHARE=0.25
-CLAUDE_METER_5H_LIMIT=0.25
-CLAUDE_METER_7D_LIMIT=0.25
-```
-
----
-
-## Monitoring
-
-Logs are written to `~/.claude-meter/normalized/YYYY-MM-DD.jsonl` and include `blocked` and `warn` event types alongside normal API records.
-
-Run the analysis:
-```bash
-python3 analysis/analyze_normalized_log.py ~/.claude-meter --summary
-```
-
----
-
 ## How It Works
 
-1. **Before each request:** Proxy checks last-known utilization from Anthropic headers. If ≥ 25%, returns HTTP 429 with `Retry-After`.
-2. **After each response:** Proxy extracts updated utilization from response headers and stores in memory.
-3. **Fail open:** If state is stale (>300s without headers) or any error occurs, requests pass through. Never permanently blocks due to proxy bugs.
-4. **No persistence:** State is in-memory only. On restart, allows all requests until first response updates state.
-5. **Auto-restart:** systemd service restarts on crash and starts on boot. Heartbeat monitors health.
+1. **Before each request:** Proxy checks last-known utilization from Anthropic headers. If ≥ 25%, returns HTTP 429.
+2. **After each response:** Proxy extracts updated utilization from response headers.
+3. **Fail open:** Stale state or errors → requests pass through. Never permanently blocks.
+4. **No persistence:** In-memory only. On restart, allows all requests until first response.
+5. **Auto-restart:** systemd handles crash recovery and boot start.
