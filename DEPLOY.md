@@ -8,22 +8,36 @@ Run this on each OpenClaw machine. Copy-paste the whole thing.
 #!/usr/bin/env bash
 set -euo pipefail
 
+# --- Prerequisites check ---
+for cmd in go jq curl; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "❌ Missing required tool: $cmd"; exit 1; }
+done
+
+CURRENT_USER="$(whoami)"
+
 echo "=== 1. Clone & build ==="
 cd ~/.openclaw/workspace
-git clone git@github.com:ryanshuzzz/claude-meter.git 2>/dev/null || (cd claude-meter && git pull)
-cd claude-meter && git checkout senor-dev
+if [ -d "claude-meter" ]; then
+  cd claude-meter
+  git fetch origin && git checkout senor-dev && git pull origin senor-dev
+else
+  git clone git@github.com:ryanshuzzz/claude-meter.git
+  cd claude-meter
+  git checkout senor-dev
+fi
 go build -o claude-meter ./cmd/claude-meter
 sudo cp claude-meter /usr/local/bin/claude-meter
+echo " ✅ Built and installed"
 
 echo "=== 2. Create systemd service ==="
-sudo tee /etc/systemd/system/claude-meter.service > /dev/null << 'UNIT'
+sudo tee /etc/systemd/system/claude-meter.service > /dev/null << UNIT
 [Unit]
 Description=claude-meter rate-limited proxy
 After=network.target
 
 [Service]
 Type=simple
-User=senorai
+User=${CURRENT_USER}
 ExecStart=/usr/local/bin/claude-meter start --plan-tier max_20x --instance-share 0.25
 Restart=always
 RestartSec=5
@@ -35,16 +49,23 @@ UNIT
 sudo systemctl daemon-reload
 sudo systemctl enable --now claude-meter
 sleep 2
+echo " ✅ systemd service created and started"
 
 echo "=== 3. Verify proxy ==="
-curl -sf http://127.0.0.1:7735/health && echo " ✅ Proxy running" || echo " ❌ Proxy failed to start"
-curl -s http://127.0.0.1:7735/status | jq .
+curl -sf http://127.0.0.1:7735/health && echo " ✅ Proxy running" || { echo " ❌ Proxy failed to start"; sudo journalctl -u claude-meter --no-pager -n 10; exit 1; }
 
 echo "=== 4. Wire OpenClaw to proxy ==="
-# Add baseUrl override to openclaw.json (merge mode preserves existing config)
 OCJSON="$HOME/.openclaw/openclaw.json"
 cp "$OCJSON" "$OCJSON.pre-claude-meter"
-jq '.models = (.models // {}) | .models.mode = "merge" | .models.providers = (.models.providers // {}) | .models.providers.anthropic = (.models.providers.anthropic // {}) | .models.providers.anthropic.baseUrl = "http://127.0.0.1:7735" | .models.providers.anthropic.models = (.models.providers.anthropic.models // [])' "$OCJSON.pre-claude-meter" > "$OCJSON"
+# Safely merge baseUrl into existing config without clobbering anything
+jq '
+  .models //= {} |
+  .models.mode = "merge" |
+  .models.providers //= {} |
+  .models.providers.anthropic //= {} |
+  .models.providers.anthropic.baseUrl = "http://127.0.0.1:7735" |
+  .models.providers.anthropic.models //= []
+' "$OCJSON.pre-claude-meter" > "$OCJSON"
 echo " ✅ OpenClaw pointed at claude-meter proxy"
 
 echo "=== 5. Patch AGENTS.md ==="
@@ -91,22 +112,27 @@ openclaw gateway restart &
 sleep 5
 
 echo ""
-echo "=== Done! ==="
-echo "Proxy:    http://127.0.0.1:7735"
-echo "Status:   claude-meter status"
-echo "Hook:     bash claude-meter/scripts/check-usage.sh"
+echo "=========================================="
+echo " claude-meter deployed successfully! 🎉"
+echo "=========================================="
+echo ""
+echo "  Proxy:    http://127.0.0.1:7735"
+echo "  Status:   claude-meter status"
+echo "  Hook:     bash claude-meter/scripts/check-usage.sh"
+echo ""
 bash ~/.openclaw/workspace/claude-meter/scripts/check-usage.sh
 ```
 
 ## What this does
 
-1. Clones claude-meter repo (or pulls if already there)
-2. Builds the Go binary and installs to `/usr/local/bin/`
-3. Creates systemd service (auto-start on boot, auto-restart on crash)
-4. Points OpenClaw's Anthropic provider at the local proxy (`http://127.0.0.1:7735`)
-5. Patches AGENTS.md with mandatory per-message usage check + footer
-6. Patches HEARTBEAT.md with health monitoring
-7. Restarts OpenClaw to pick up the new config
+1. Checks prerequisites (`go`, `jq`, `curl`)
+2. Clones claude-meter repo (or updates if already there)
+3. Builds the Go binary and installs to `/usr/local/bin/`
+4. Creates systemd service with current user (auto-start on boot, auto-restart on crash)
+5. Points OpenClaw's Anthropic provider at the local proxy (`http://127.0.0.1:7735`)
+6. Patches AGENTS.md with mandatory per-message usage check + footer
+7. Patches HEARTBEAT.md with health monitoring
+8. Restarts OpenClaw to pick up the new config
 
 ## Manual Usage Check
 
