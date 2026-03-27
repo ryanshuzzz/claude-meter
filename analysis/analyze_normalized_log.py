@@ -734,10 +734,38 @@ def load_records_multi(log_path):
     return records
 
 
+def _count_rate_limit_events(records):
+    """Count blocked and warn events per window from event records."""
+    counts = {
+        "blocks_5h": 0,
+        "blocks_7d": 0,
+        "warns_5h": 0,
+        "warns_7d": 0,
+    }
+    for r in records:
+        rtype = r.get("type")
+        window = r.get("window", "")
+        if rtype == "blocked":
+            if window == "5h":
+                counts["blocks_5h"] += 1
+            elif window == "7d":
+                counts["blocks_7d"] += 1
+        elif rtype == "warn":
+            if window == "5h":
+                counts["warns_5h"] += 1
+            elif window == "7d":
+                counts["warns_7d"] += 1
+    return counts
+
+
 def render_summary(records):
     """Render a human-readable summary string."""
-    token_summary = build_token_summary(records)
-    budget_estimates = build_session_budget_estimates(records)
+    # Separate API records from rate limit event records.
+    api_records = [r for r in records if r.get("type") not in ("blocked", "warn")]
+    event_records = [r for r in records if r.get("type") in ("blocked", "warn")]
+
+    token_summary = build_token_summary(api_records)
+    budget_estimates = build_session_budget_estimates(api_records)
 
     lines = []
     plan = token_summary.get("plan_tier") or "unknown"
@@ -786,6 +814,17 @@ def render_summary(records):
             lines.append(f"  Range:   ${est['min']:,.0f} - ${est['max']:,.0f}")
             lines.append(f"  Median:  ${est['median']:,.0f}")
             lines.append(f"  p25-p75: ${est['p25']:,.0f} - ${est['p75']:,.0f}")
+        lines.append("")
+
+    # Rate limit events
+    if event_records:
+        rl_counts = _count_rate_limit_events(event_records)
+        lines.append("Rate Limit Events")
+        lines.append("-" * 20)
+        lines.append(f"  Blocks (5h):    {rl_counts['blocks_5h']}")
+        lines.append(f"  Blocks (7d):    {rl_counts['blocks_7d']}")
+        lines.append(f"  Warnings (5h):  {rl_counts['warns_5h']}")
+        lines.append(f"  Warnings (7d):  {rl_counts['warns_7d']}")
         lines.append("")
 
     lines.append("By Model")
