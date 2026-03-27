@@ -2,7 +2,7 @@
 set -e
 
 # claude-meter installer — builds from source
-# Review this script: https://github.com/opslane/claude-meter/blob/main/install.sh
+# Review this script: https://github.com/abhishekray07/claude-meter/blob/main/install.sh
 
 if ! command -v go &>/dev/null; then
   echo "Go is required. Install from https://go.dev/dl/"
@@ -21,7 +21,7 @@ elif [ -d "$SRC_DIR" ]; then
   cd "$SRC_DIR" && git pull
 else
   echo "Cloning claude-meter..."
-  git clone https://github.com/opslane/claude-meter.git "$SRC_DIR"
+  git clone https://github.com/abhishekray07/claude-meter.git "$SRC_DIR"
 fi
 
 echo "Building..."

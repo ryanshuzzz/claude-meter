@@ -148,13 +148,13 @@ This separation is deliberate:
 ### Option 1: One-liner install (builds from source)
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/opslane/claude-meter/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/abhishekray07/claude-meter/main/install.sh | bash
 ```
 
 ### Option 2: Manual install (review source first)
 
 ```bash
-git clone https://github.com/opslane/claude-meter.git
+git clone https://github.com/abhishekray07/claude-meter.git
 cd claude-meter
 go build -o claude-meter ./cmd/claude-meter
 ./claude-meter start --plan-tier max_20x
@@ -308,12 +308,12 @@ That is why the long-term value is not just local observability. It is eventuall
 
 ## Repo Layout
 
-- [cmd/claude-meter](/Users/abhishekray/Projects/opslane/claude-meter/cmd/claude-meter): proxy entrypoint and backfill command
-- [internal/proxy](/Users/abhishekray/Projects/opslane/claude-meter/internal/proxy): transparent HTTP proxy
-- [internal/normalize](/Users/abhishekray/Projects/opslane/claude-meter/internal/normalize): response parsing and normalized record derivation
-- [internal/storage](/Users/abhishekray/Projects/opslane/claude-meter/internal/storage): raw and normalized JSONL writers
-- [analysis](/Users/abhishekray/Projects/opslane/claude-meter/analysis): offline estimators and supporting scripts
-- [docs/plans](/Users/abhishekray/Projects/opslane/claude-meter/docs/plans): implementation plans and design notes
+- [cmd/claude-meter](cmd/claude-meter): proxy entrypoint and backfill command
+- [internal/proxy](internal/proxy): transparent HTTP proxy
+- [internal/normalize](internal/normalize): response parsing and normalized record derivation
+- [internal/storage](internal/storage): raw and normalized JSONL writers
+- [analysis](analysis): offline estimators and supporting scripts
+- [docs/plans](docs/plans): implementation plans and design notes
 
 ## Current Recommendation
 
