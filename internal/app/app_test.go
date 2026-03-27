@@ -137,9 +137,29 @@ func TestAppWritesNormalizedRecordLog(t *testing.T) {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
 
+	// The file may contain rate limit event records (type: warn/blocked) in addition
+	// to the normalized API record. Find the first non-event record.
 	var got normalize.Record
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("Unmarshal() error = %v", err)
+	found := false
+	for _, line := range strings.Split(strings.TrimRight(string(data), "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		var probe struct {
+			Type string `json:"type"`
+		}
+		_ = json.Unmarshal([]byte(line), &probe)
+		if probe.Type == "blocked" || probe.Type == "warn" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &got); err != nil {
+			t.Fatalf("Unmarshal() error = %v", err)
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("no normalized API record found in log file")
 	}
 
 	if got.DeclaredPlanTier != "max_20x" {

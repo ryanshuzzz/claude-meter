@@ -4,26 +4,41 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"sync/atomic"
 	"time"
 
 	"claude-meter-proxy/internal/capture"
+	"claude-meter-proxy/internal/config"
+	"claude-meter-proxy/internal/ratelimit"
+	"claude-meter-proxy/internal/storage"
 )
 
+// Config holds the configuration for the proxy Server.
 type Config struct {
-	UpstreamBaseURL *url.URL
-	Client          *http.Client
-	CaptureCh       chan<- capture.CompletedExchange
+	UpstreamBaseURL  *url.URL
+	Client           *http.Client
+	CaptureCh        chan<- capture.CompletedExchange
+	State            *ratelimit.AccountState
+	Cfg              *config.Config
+	NormalizedWriter *storage.NormalizedRecordWriter
 }
 
+// Server is the HTTP reverse proxy.
 type Server struct {
-	upstreamBaseURL *url.URL
-	client          *http.Client
-	captureCh       chan<- capture.CompletedExchange
-	nextID          atomic.Uint64
-	droppedCount    atomic.Uint64
+	upstreamBaseURL  *url.URL
+	client           *http.Client
+	captureCh        chan<- capture.CompletedExchange
+	nextID           atomic.Uint64
+	droppedCount     atomic.Uint64
+	state            *ratelimit.AccountState
+	cfg              *config.Config
+	normalizedWriter *storage.NormalizedRecordWriter
+	blockedToday     atomic.Int64
+	w5hWarnIssued    atomic.Bool
+	w7dWarnIssued    atomic.Bool
 }
 
 func New(cfg Config) *Server {
@@ -33,9 +48,12 @@ func New(cfg Config) *Server {
 	}
 
 	return &Server{
-		upstreamBaseURL: cfg.UpstreamBaseURL,
-		client:          client,
-		captureCh:       cfg.CaptureCh,
+		upstreamBaseURL:  cfg.UpstreamBaseURL,
+		client:           client,
+		captureCh:        cfg.CaptureCh,
+		state:            cfg.State,
+		cfg:              cfg.Cfg,
+		normalizedWriter: cfg.NormalizedWriter,
 	}
 }
 
@@ -43,9 +61,30 @@ func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(s.ServeHTTP)
 }
 
+// BlockedCount returns the number of requests blocked by the rate limiter since startup.
+func (s *Server) BlockedCount() int64 {
+	return s.blockedToday.Load()
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	requestID := s.nextID.Add(1)
+
+	// Pre-flight rate limit check. Fail open on any error.
+	if s.state != nil && s.cfg != nil {
+		blocked, reason, retryAfter := s.state.Check(&s.cfg.RateLimits)
+		if blocked {
+			s.blockedToday.Add(1)
+			s.logBlockedEvent(r, retryAfter)
+			if !retryAfter.IsZero() {
+				w.Header().Set("Retry-After", retryAfter.UTC().Format(time.RFC1123))
+			}
+			w.Header().Set("X-Claude-Meter-Blocked", "true")
+			w.Header().Set("X-Claude-Meter-Reason", reason)
+			http.Error(w, reason, http.StatusTooManyRequests)
+			return
+		}
+	}
 
 	requestBody, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -71,6 +110,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Update rate limit state from response headers (even for error status codes).
+	if s.state != nil {
+		s.state.Update(resp.Header)
+		s.checkWarnThreshold()
+	}
 
 	for name, values := range resp.Header {
 		for _, value := range values {
@@ -102,6 +147,79 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if copyErr != nil {
 		return
+	}
+}
+
+// logBlockedEvent writes a BlockedEvent to the normalized log when a request is blocked.
+func (s *Server) logBlockedEvent(r *http.Request, retryAfter time.Time) {
+	if s.normalizedWriter == nil {
+		return
+	}
+	w5h, w7d := s.state.Snapshot()
+	window := "7d"
+	util := w7d.Utilization
+	if s.cfg.RateLimits.Windows.H5.Enabled && w5h.Utilization >= s.cfg.RateLimits.Windows.H5.HardLimit {
+		window = "5h"
+		util = w5h.Utilization
+	}
+	ev := storage.BlockedEvent{
+		Type:               "blocked",
+		Ts:                 time.Now().UTC(),
+		Window:             window,
+		AccountUtilization: util,
+		InstanceLimit:      s.cfg.RateLimits.InstanceShare,
+		RetryAfter:         retryAfter,
+		RequestPath:        r.URL.Path,
+	}
+	if err := s.normalizedWriter.WriteBlockedEvent(ev); err != nil {
+		log.Printf("claude-meter: write blocked event: %v", err)
+	}
+}
+
+// checkWarnThreshold emits a warn event the first time utilization crosses the warn threshold
+// for each window. The flag resets when utilization drops back below the threshold.
+func (s *Server) checkWarnThreshold() {
+	if s.cfg == nil || s.normalizedWriter == nil {
+		return
+	}
+	cfg := &s.cfg.RateLimits
+	w5h, w7d := s.state.Snapshot()
+	now := time.Now().UTC()
+
+	if cfg.Windows.H5.Enabled && w5h.Utilization >= cfg.Windows.H5.WarnThreshold {
+		if s.w5hWarnIssued.CompareAndSwap(false, true) {
+			ev := storage.WarnEvent{
+				Type:               "warn",
+				Ts:                 now,
+				Window:             "5h",
+				AccountUtilization: w5h.Utilization,
+				InstanceLimit:      cfg.Windows.H5.HardLimit,
+				HeadroomRemaining:  cfg.Windows.H5.HardLimit - w5h.Utilization,
+			}
+			if err := s.normalizedWriter.WriteWarnEvent(ev); err != nil {
+				log.Printf("claude-meter: write warn event: %v", err)
+			}
+		}
+	} else {
+		s.w5hWarnIssued.Store(false)
+	}
+
+	if cfg.Windows.D7.Enabled && w7d.Utilization >= cfg.Windows.D7.WarnThreshold {
+		if s.w7dWarnIssued.CompareAndSwap(false, true) {
+			ev := storage.WarnEvent{
+				Type:               "warn",
+				Ts:                 now,
+				Window:             "7d",
+				AccountUtilization: w7d.Utilization,
+				InstanceLimit:      cfg.Windows.D7.HardLimit,
+				HeadroomRemaining:  cfg.Windows.D7.HardLimit - w7d.Utilization,
+			}
+			if err := s.normalizedWriter.WriteWarnEvent(ev); err != nil {
+				log.Printf("claude-meter: write warn event: %v", err)
+			}
+		}
+	} else {
+		s.w7dWarnIssued.Store(false)
 	}
 }
 
