@@ -64,7 +64,7 @@ This instance runs behind a claude-meter proxy that enforces a 25% share of the 
 - **⚠️ Usage high (>80%)** → conserve tokens: skip non-essential work, use shorter prompts, avoid spawning multiple sub-agents, prefer cached context
 - **🚫 RATE LIMITED** → STOP. Tell the user you're rate limited, show the reset time, and suggest waiting. Do NOT retry in a loop.
 
-**Quick status:** `curl -s http://127.0.0.1:7735/status | jq .`
+**On "usage" or "check usage" requests:** Run `curl -s http://127.0.0.1:7735/status | jq .` and present the full status in a readable format — both windows, headroom, reset times, and blocked count.
 
 **Be token-conscious always:** You share this account with 3 other instances. Prefer cache-friendly prompts, batch work, and avoid unnecessary retries.
 PATCH
