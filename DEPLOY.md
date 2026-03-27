@@ -94,18 +94,49 @@ claude-meter status
 
 ## OpenClaw Agent Instructions
 
-Add this to your OpenClaw instance's workspace files (AGENTS.md, TOOLS.md, or a dedicated config note) so your AI agent knows about the rate limiter:
+### 1. Clone the repo into each instance's workspace
 
-```markdown
-## Rate Limiter (claude-meter)
-
-This instance runs behind a claude-meter proxy that enforces a 25% share of the Anthropic account budget.
-
-- **Status command:** Run `curl -s http://127.0.0.1:7735/status | jq .` to check current utilization
-- **When you get a 429:** The proxy blocked you because the account hit 25% utilization. Check the `X-Claude-Meter-Reason` and `Retry-After` headers. Wait for the window to reset.
-- **Be token-conscious:** You share this account with 3 other instances. Prefer cache-friendly prompts, avoid unnecessary retries, and batch work when possible.
-- **Check before big jobs:** Before starting a large multi-agent task, check `claude-meter status` to see how much headroom you have.
+```bash
+cd ~/.openclaw/workspace
+git clone git@github.com:ryanshuzzz/claude-meter.git
+cd claude-meter && git checkout senor-dev
 ```
+
+### 2. Add the pre-flight hook to AGENTS.md
+
+Add this to each instance's `AGENTS.md` — in the **Session Startup** section AND as a standalone section:
+
+**In Session Startup (add as step 5):**
+```markdown
+5. **Run usage check:** `bash claude-meter/scripts/check-usage.sh` — check account utilization before doing anything
+```
+
+**As a standalone section:**
+```markdown
+## 📊 Rate Limiter (claude-meter)
+
+This instance runs behind a claude-meter proxy that enforces a 25% share of the shared Anthropic account budget.
+
+**Pre-flight check (MANDATORY):** Run `bash claude-meter/scripts/check-usage.sh` at the START of every session and BEFORE any heavy work (multi-agent spawns, large refactors, long conversations).
+
+- **✅ Usage OK** → proceed normally
+- **⚠️ Usage high (>80%)** → conserve tokens: skip non-essential work, use shorter prompts, avoid spawning multiple sub-agents, prefer cached context
+- **🚫 RATE LIMITED** → STOP. Tell the user you're rate limited, show the reset time, and suggest waiting. Do NOT retry in a loop.
+
+**Quick status:** `curl -s http://127.0.0.1:7735/status | jq .`
+
+**Be token-conscious always:** You share this account with 3 other instances. Prefer cache-friendly prompts, batch work, and avoid unnecessary retries.
+```
+
+### 3. What the hook does
+
+`claude-meter/scripts/check-usage.sh` hits the local proxy's `/status` endpoint and returns:
+- Exit 0 + "✅ Usage OK" — headroom exists, proceed normally
+- Exit 0 + "⚠️ Usage high" — >80% of budget used, agent should conserve
+- Exit 1 + "🚫 RATE LIMITED" — at or above limit, agent should stop and wait
+- Exit 0 + "⚠️ not reachable" — proxy down, fail open (proceed without check)
+
+The agent reads the output and adjusts behavior accordingly. No code changes to OpenClaw needed.
 
 ## Adjusting Shares
 
