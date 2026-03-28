@@ -86,6 +86,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Capture pre-request state for local utilization attribution.
+	var preUtil5h, preUtil7d float64
+	var hadPrior5h, hadPrior7d bool
+	if s.state != nil {
+		snap5h, snap7d := s.state.Snapshot()
+		preUtil5h = snap5h.Utilization
+		preUtil7d = snap7d.Utilization
+		hadPrior5h = !snap5h.ObservedAt.IsZero()
+		hadPrior7d = !snap7d.ObservedAt.IsZero()
+	}
+
 	requestBody, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusBadRequest)
@@ -111,9 +122,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// Update rate limit state from response headers (even for error status codes).
+	// Update rate limit state from response headers with local attribution.
 	if s.state != nil {
-		s.state.Update(resp.Header)
+		s.state.UpdateWithAttribution(resp.Header, preUtil5h, preUtil7d, hadPrior5h, hadPrior7d)
 		s.checkWarnThreshold()
 	}
 
@@ -157,10 +168,10 @@ func (s *Server) logBlockedEvent(r *http.Request, retryAfter time.Time) {
 	}
 	w5h, w7d := s.state.Snapshot()
 	window := "7d"
-	util := w7d.Utilization
-	if s.cfg.RateLimits.Windows.H5.Enabled && w5h.Utilization >= s.cfg.RateLimits.Windows.H5.HardLimit {
+	util := w7d.LocalUtil
+	if s.cfg.RateLimits.Windows.H5.Enabled && w5h.LocalUtil >= s.cfg.RateLimits.Windows.H5.HardLimit {
 		window = "5h"
-		util = w5h.Utilization
+		util = w5h.LocalUtil
 	}
 	ev := storage.BlockedEvent{
 		Type:               "blocked",
@@ -186,15 +197,15 @@ func (s *Server) checkWarnThreshold() {
 	w5h, w7d := s.state.Snapshot()
 	now := time.Now().UTC()
 
-	if cfg.Windows.H5.Enabled && w5h.Utilization >= cfg.Windows.H5.WarnThreshold {
+	if cfg.Windows.H5.Enabled && w5h.LocalUtil >= cfg.Windows.H5.WarnThreshold {
 		if s.w5hWarnIssued.CompareAndSwap(false, true) {
 			ev := storage.WarnEvent{
 				Type:               "warn",
 				Ts:                 now,
 				Window:             "5h",
-				AccountUtilization: w5h.Utilization,
+				AccountUtilization: w5h.LocalUtil,
 				InstanceLimit:      cfg.Windows.H5.HardLimit,
-				HeadroomRemaining:  cfg.Windows.H5.HardLimit - w5h.Utilization,
+				HeadroomRemaining:  cfg.Windows.H5.HardLimit - w5h.LocalUtil,
 			}
 			if err := s.normalizedWriter.WriteWarnEvent(ev); err != nil {
 				log.Printf("claude-meter: write warn event: %v", err)
@@ -204,15 +215,15 @@ func (s *Server) checkWarnThreshold() {
 		s.w5hWarnIssued.Store(false)
 	}
 
-	if cfg.Windows.D7.Enabled && w7d.Utilization >= cfg.Windows.D7.WarnThreshold {
+	if cfg.Windows.D7.Enabled && w7d.LocalUtil >= cfg.Windows.D7.WarnThreshold {
 		if s.w7dWarnIssued.CompareAndSwap(false, true) {
 			ev := storage.WarnEvent{
 				Type:               "warn",
 				Ts:                 now,
 				Window:             "7d",
-				AccountUtilization: w7d.Utilization,
+				AccountUtilization: w7d.LocalUtil,
 				InstanceLimit:      cfg.Windows.D7.HardLimit,
-				HeadroomRemaining:  cfg.Windows.D7.HardLimit - w7d.Utilization,
+				HeadroomRemaining:  cfg.Windows.D7.HardLimit - w7d.LocalUtil,
 			}
 			if err := s.normalizedWriter.WriteWarnEvent(ev); err != nil {
 				log.Printf("claude-meter: write warn event: %v", err)

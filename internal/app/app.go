@@ -146,19 +146,21 @@ func (a *App) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /status", a.handleStatus)
 	mux.HandleFunc("GET /health", a.handleHealth)
+	mux.HandleFunc("POST /reset", a.handleReset)
 	mux.Handle("/", a.proxy.Handler())
 	return mux
 }
 
 // windowStatus is the JSON shape for one rate limit window in the status response.
 type windowStatus struct {
-	Utilization    float64 `json:"utilization"`
-	Limit          float64 `json:"limit"`
-	Headroom       float64 `json:"headroom"`
-	PctOfLimitUsed float64 `json:"pct_of_limit_used"`
-	ResetAt        string  `json:"reset_at"`
-	Stale          bool    `json:"stale"`
-	ObservedAt     string  `json:"observed_at"`
+	Utilization        float64 `json:"utilization"`
+	AccountUtilization float64 `json:"account_utilization"`
+	Limit              float64 `json:"limit"`
+	Headroom           float64 `json:"headroom"`
+	PctOfLimitUsed     float64 `json:"pct_of_limit_used"`
+	ResetAt            string  `json:"reset_at"`
+	Stale              bool    `json:"stale"`
+	ObservedAt         string  `json:"observed_at"`
 }
 
 // statusResponse is the JSON body returned by the /status endpoint.
@@ -169,20 +171,22 @@ type statusResponse struct {
 	ProxyUptimeSeconds   int64                    `json:"proxy_uptime_seconds"`
 }
 
-func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	w5h, w7d := a.state.Snapshot()
 	now := time.Now()
 	staleThreshold := time.Duration(a.cfg.RateLimits.StaleAfterSeconds) * time.Second
 
 	makeWindow := func(ws ratelimit.WindowState, limit float64) windowStatus {
 		stale := ws.ObservedAt.IsZero() || now.Sub(ws.ObservedAt) > staleThreshold
-		headroom := limit - ws.Utilization
+		headroom := limit - ws.LocalUtil
 		if headroom < 0 {
 			headroom = 0
 		}
 		pct := 0.0
 		if limit > 0 {
-			pct = ws.Utilization / limit * 100
+			pct = ws.LocalUtil / limit * 100
 		}
 		resetAt := ""
 		if !ws.ResetAt.IsZero() {
@@ -193,13 +197,14 @@ func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			observedAt = ws.ObservedAt.UTC().Format(time.RFC3339)
 		}
 		return windowStatus{
-			Utilization:    ws.Utilization,
-			Limit:          limit,
-			Headroom:       headroom,
-			PctOfLimitUsed: pct,
-			ResetAt:        resetAt,
-			Stale:          stale,
-			ObservedAt:     observedAt,
+			Utilization:        ws.LocalUtil,
+			AccountUtilization: ws.Utilization,
+			Limit:              limit,
+			Headroom:           headroom,
+			PctOfLimitUsed:     pct,
+			ResetAt:            resetAt,
+			Stale:              stale,
+			ObservedAt:         observedAt,
 		}
 	}
 
@@ -222,6 +227,12 @@ func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
 func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
+}
+
+func (a *App) handleReset(w http.ResponseWriter, _ *http.Request) {
+	a.state.Reset()
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"ok":true,"message":"local utilization counters reset"}` + "\n"))
 }
 
 func (a *App) Close() error {

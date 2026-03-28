@@ -20,7 +20,7 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "usage: %s <start|status|backfill-normalized> [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s <start|status|reset|backfill-normalized> [options]\n", os.Args[0])
 		os.Exit(2)
 	}
 
@@ -29,12 +29,14 @@ func main() {
 		runStart(os.Args[2:])
 	case "status":
 		runStatus(os.Args[2:])
+	case "reset":
+		runReset(os.Args[2:])
 	case "backfill-normalized":
 		if err := runBackfillNormalized(os.Args[2:]); err != nil {
 			log.Fatalf("backfill-normalized: %v", err)
 		}
 	default:
-		fmt.Fprintf(os.Stderr, "usage: %s <start|status|backfill-normalized> [options]\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "usage: %s <start|status|reset|backfill-normalized> [options]\n", os.Args[0])
 		os.Exit(2)
 	}
 }
@@ -101,13 +103,14 @@ func runStart(args []string) {
 
 // statusWindowJSON is the JSON shape for one window in the /status response.
 type statusWindowJSON struct {
-	Utilization    float64 `json:"utilization"`
-	Limit          float64 `json:"limit"`
-	Headroom       float64 `json:"headroom"`
-	PctOfLimitUsed float64 `json:"pct_of_limit_used"`
-	ResetAt        string  `json:"reset_at"`
-	Stale          bool    `json:"stale"`
-	ObservedAt     string  `json:"observed_at"`
+	Utilization        float64 `json:"utilization"`
+	AccountUtilization float64 `json:"account_utilization"`
+	Limit              float64 `json:"limit"`
+	Headroom           float64 `json:"headroom"`
+	PctOfLimitUsed     float64 `json:"pct_of_limit_used"`
+	ResetAt            string  `json:"reset_at"`
+	Stale              bool    `json:"stale"`
+	ObservedAt         string  `json:"observed_at"`
 }
 
 // statusJSON is the JSON body of the /status endpoint.
@@ -155,8 +158,9 @@ func printStatus(s statusJSON) {
 		}
 		fmt.Printf("%s Window\n", wname)
 		bar := progressBar(w.PctOfLimitUsed, 16)
-		fmt.Printf("  Account util:  %.1f%% / %.1f%% cap  [%s]  %.0f%% of budget used\n",
+		fmt.Printf("  This instance: %.1f%% / %.1f%% cap  [%s]  %.0f%% of budget used\n",
 			w.Utilization*100, w.Limit*100, bar, w.PctOfLimitUsed)
+		fmt.Printf("  Account-wide:  %.1f%%\n", w.AccountUtilization*100)
 		fmt.Printf("  Headroom:      %.1f%% remaining\n", w.Headroom*100)
 		if w.ResetAt != "" {
 			resetAt, err := time.Parse(time.RFC3339, w.ResetAt)
@@ -200,6 +204,25 @@ func formatTimeRemaining(d time.Duration) string {
 		return fmt.Sprintf("%dh %dm", hours, minutes)
 	}
 	return fmt.Sprintf("%dm", minutes)
+}
+
+func runReset(args []string) {
+	resetFlags := flag.NewFlagSet("reset", flag.ExitOnError)
+	port := resetFlags.Int("port", 7735, "proxy port to query")
+	resetFlags.Parse(args)
+
+	resetURL := fmt.Sprintf("http://127.0.0.1:%d/reset", *port)
+	resp, err := http.Post(resetURL, "application/json", nil) //nolint:gosec
+	if err != nil {
+		log.Fatalf("reset: connect to %s: %v", resetURL, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Fatalf("reset: server returned %d", resp.StatusCode)
+	}
+
+	fmt.Println("Local utilization counters reset successfully.")
 }
 
 func defaultLogDir() string {

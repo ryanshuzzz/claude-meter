@@ -16,28 +16,30 @@ fi
 
 w5h_util=$(echo "$response" | jq -r '.windows["5h"].utilization // 0')
 w5h_limit=$(echo "$response" | jq -r '.windows["5h"].limit // 0.25')
+w5h_acct=$(echo "$response" | jq -r '.windows["5h"].account_utilization // 0')
 w7d_util=$(echo "$response" | jq -r '.windows["7d"].utilization // 0')
 w7d_limit=$(echo "$response" | jq -r '.windows["7d"].limit // 0.25')
+w7d_acct=$(echo "$response" | jq -r '.windows["7d"].account_utilization // 0')
 blocked=$(echo "$response" | jq -r '.blocked_requests_today // 0')
 
 w5h_pct=$(echo "$response" | jq -r '.windows["5h"].pct_of_limit_used // 0' | cut -d. -f1)
 w7d_pct=$(echo "$response" | jq -r '.windows["7d"].pct_of_limit_used // 0' | cut -d. -f1)
 
-# Check if either window is at or above limit
+# Check if either window is at or above limit (based on local instance util)
 w5h_blocked=$(awk "BEGIN {print ($w5h_util >= $w5h_limit) ? 1 : 0}")
 w7d_blocked=$(awk "BEGIN {print ($w7d_util >= $w7d_limit) ? 1 : 0}")
 
 if [ "$w5h_blocked" -eq 1 ] || [ "$w7d_blocked" -eq 1 ]; then
   w5h_reset=$(echo "$response" | jq -r '.windows["5h"].reset_at // "unknown"')
   w7d_reset=$(echo "$response" | jq -r '.windows["7d"].reset_at // "unknown"')
-  echo "🚫 RATE LIMITED — 5h: ${w5h_pct}% used, 7d: ${w7d_pct}% used | Blocked today: ${blocked} | Resets: 5h=${w5h_reset}, 7d=${w7d_reset}"
+  echo "🚫 RATE LIMITED — local: 5h=${w5h_pct}%, 7d=${w7d_pct}% | acct: 5h=$(awk "BEGIN {printf \"%.0f\", $w5h_acct*100}")%, 7d=$(awk "BEGIN {printf \"%.0f\", $w7d_acct*100}")% | Blocked: ${blocked} | Resets: 5h=${w5h_reset}, 7d=${w7d_reset}"
   exit 1
 fi
 
 if [ "${w5h_pct:-0}" -ge 80 ] || [ "${w7d_pct:-0}" -ge 80 ]; then
-  echo "⚠️ Usage high — 5h: ${w5h_pct}% of budget, 7d: ${w7d_pct}% of budget | Blocked today: ${blocked} — conserve tokens"
+  echo "⚠️ Usage high — local: 5h=${w5h_pct}%, 7d=${w7d_pct}% | acct: 5h=$(awk "BEGIN {printf \"%.0f\", $w5h_acct*100}")%, 7d=$(awk "BEGIN {printf \"%.0f\", $w7d_acct*100}")% | Blocked: ${blocked} — conserve tokens"
   exit 0
 fi
 
-echo "✅ Usage OK — 5h: ${w5h_pct}%, 7d: ${w7d_pct}% of budget | Blocked today: ${blocked}"
+echo "✅ Usage OK — local: 5h=${w5h_pct}%, 7d=${w7d_pct}% | acct: 5h=$(awk "BEGIN {printf \"%.0f\", $w5h_acct*100}")%, 7d=$(awk "BEGIN {printf \"%.0f\", $w7d_acct*100}")% | Blocked: ${blocked}"
 exit 0
