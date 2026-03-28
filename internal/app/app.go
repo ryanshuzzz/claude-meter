@@ -169,7 +169,9 @@ type statusResponse struct {
 	ProxyUptimeSeconds   int64                    `json:"proxy_uptime_seconds"`
 }
 
-func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
+func (a *App) handleStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
 	w5h, w7d := a.state.Snapshot()
 	now := time.Now()
 	staleThreshold := time.Duration(a.cfg.RateLimits.StaleAfterSeconds) * time.Second
